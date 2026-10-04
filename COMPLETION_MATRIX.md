@@ -45,3 +45,10 @@ Statuses are conservative and evidence-based. `REAL + VERIFIED` means an executa
 | Video generation API | REAL + VERIFIED boundary | `/v1/video/generate` returns structured `VIDEO_BACKEND_UNAVAILABLE` without creating a fake job |
 | Video rendering/export | NOT_IMPLEMENTED | No video renderer, MediaMuxer export path, or media validator exists yet |
 | Video UI | NOT_IMPLEMENTED | No decorative controls added while video backend is unavailable |
+| Image provider contract | REAL + VERIFIED boundary | Provider models and Worker endpoint exist; no local image model/workflow is installed |
+| HD image generation | NOT_INSTALLED | No image backend or output validator is installed |
+| Audio provider contract | REAL + VERIFIED boundary | Audio provider models and Worker endpoint exist; no local audio backend is installed |
+| Talking-avatar contract | REAL + UNVERIFIED | Contract exists; no phoneme/viseme backend or facial animation output is installed |
+| Scene system | MISSING | Documentation boundary only; no Room scene entities or editor |
+| Project system | REAL + UNVERIFIED | Existing asset/job Room foundation; project entities and editor are not implemented |
+| Unified media jobs | REAL + UNVERIFIED | Common Kotlin media job models exist; only unavailable Worker contracts are exercised |

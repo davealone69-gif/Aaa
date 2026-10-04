@@ -291,6 +291,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._auth(): return self._send(401, {"error": "unauthorized"})
         if self.path == "/v1/video/generate":
             return self._send(503, {"error": {"code": "VIDEO_BACKEND_UNAVAILABLE", "message": "Wan 2.2 and LTX-2 are not installed", "recovery": "Install and configure a supported local video backend before submitting video jobs"}})
+        if self.path == "/v1/image/generate":
+            return self._send(503, {"error": {"code": "IMAGE_BACKEND_UNAVAILABLE", "message": "No local image-generation workflow is installed", "recovery": "Install and configure a supported local image backend before submitting image jobs"}})
+        if self.path == "/v1/audio/generate":
+            return self._send(503, {"error": {"code": "AUDIO_BACKEND_UNAVAILABLE", "message": "No local audio-generation backend is installed", "recovery": "Install and configure a supported local audio backend before submitting audio jobs"}})
         if self.path != "/v1/generate": return self._send(404, {"error": "not_found"})
         try:
             size = int(self.headers.get("Content-Length", "0"));

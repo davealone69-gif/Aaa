@@ -27,3 +27,4 @@ jobs:
           python3 -m py_compile worker/local_bridge.py
           python3 worker/test_unavailable_state.py
           python3 worker/test_video_unavailable.py
+          python3 worker/test_media_unavailable.py
