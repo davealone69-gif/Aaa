@@ -49,6 +49,9 @@ Statuses are conservative and evidence-based. `REAL + VERIFIED` means an executa
 | HD image generation | NOT_INSTALLED | No image backend or output validator is installed |
 | Audio provider contract | REAL + VERIFIED boundary | Audio provider models and Worker endpoint exist; no local audio backend is installed |
 | Talking-avatar contract | REAL + UNVERIFIED | Contract exists; no phoneme/viseme backend or facial animation output is installed |
-| Scene system | MISSING | Documentation boundary only; no Room scene entities or editor |
-| Project system | REAL + UNVERIFIED | Existing asset/job Room foundation; project entities and editor are not implemented |
+| Scene system | REAL + VERIFIED contract | Room v3 scene records, JSON validation, save/load/duplicate/delete repository operations; renderer/UI unverified |
+| Project system | REAL + VERIFIED contract | Room v3 project records and CRUD/duplicate/delete repository operations; Android UI/restart unverified |
 | Unified media jobs | REAL + UNVERIFIED | Common Kotlin media job models exist; only unavailable Worker contracts are exercised |
+| Reference library | REAL + VERIFIED contract | Streamed controlled-storage import, SHA-256 deduplication, metadata, text preview, delete |
+| Reference preview | PARTIAL | Text preview and metadata exist; image/video thumbnails and dimensions are not implemented |
+| Project/scene/reference UI | MISSING | No project, scene, or reference screens added; existing UI remains GLB-focused |
