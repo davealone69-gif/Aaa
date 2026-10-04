@@ -38,3 +38,10 @@ Statuses are conservative and evidence-based. `REAL + VERIFIED` means an executa
 | Rendering | UNVERIFIED | No Android device connected |
 | Recovery | UNVERIFIED | Process-death instrumentation pending |
 | Release signing | BLOCKED | No signing credentials were provided; release APK is explicitly unsigned |
+| Animation foundation | REAL + UNVERIFIED | Capability documentation added; no animation timeline/UI or device playback test |
+| Talking avatar | UNAVAILABLE | No phoneme/viseme backend is installed; no fake lip-sync output |
+| Wan 2.2 | NOT_INSTALLED | Worker health reports the provider explicitly; no runtime or weights installed |
+| LTX-2 | NOT_INSTALLED | Worker health reports the provider explicitly; no runtime or weights installed |
+| Video generation API | REAL + VERIFIED boundary | `/v1/video/generate` returns structured `VIDEO_BACKEND_UNAVAILABLE` without creating a fake job |
+| Video rendering/export | NOT_IMPLEMENTED | No video renderer, MediaMuxer export path, or media validator exists yet |
+| Video UI | NOT_IMPLEMENTED | No decorative controls added while video backend is unavailable |

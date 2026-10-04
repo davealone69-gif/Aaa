@@ -263,7 +263,11 @@ def health() -> dict[str, Any]:
     selected = next((p for p in providers if p["id"] == selected_id), None)
     for provider in providers:
         provider["adultCapability"] = ADULT_CAPABILITY if provider is selected else "UNSUPPORTED"
-    return {"ready": any(p["state"] == "READY" for p in providers), "mode": MODE, "providers": providers, "selected": selected}
+    video_providers = [
+        {"id": "wan-2.2", "state": "NOT_INSTALLED", "capabilities": ["TEXT_TO_VIDEO", "IMAGE_TO_VIDEO"], "message": "Wan 2.2 runtime and weights are not installed"},
+        {"id": "ltx-2", "state": "NOT_INSTALLED", "capabilities": ["TEXT_TO_VIDEO", "IMAGE_TO_VIDEO", "AUDIO_VIDEO"], "message": "LTX-2 runtime and weights are not installed"},
+    ]
+    return {"ready": any(p["state"] == "READY" for p in providers), "mode": MODE, "providers": providers, "videoProviders": video_providers, "selected": selected}
 
 class Handler(BaseHTTPRequestHandler):
     def _auth(self) -> bool:
@@ -285,6 +289,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not_found"})
     def do_POST(self):
         if not self._auth(): return self._send(401, {"error": "unauthorized"})
+        if self.path == "/v1/video/generate":
+            return self._send(503, {"error": {"code": "VIDEO_BACKEND_UNAVAILABLE", "message": "Wan 2.2 and LTX-2 are not installed", "recovery": "Install and configure a supported local video backend before submitting video jobs"}})
         if self.path != "/v1/generate": return self._send(404, {"error": "not_found"})
         try:
             size = int(self.headers.get("Content-Length", "0"));
