@@ -1,0 +1,18 @@
+node_modules/
+.expo/
+dist/
+build/
+.env
+.env.*
+!.env.example
+src/services/keys.ts
+*.keystore
+*.jks
+
+# TS incremental build info
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# python test artifacts
+__pycache__/
+*.pyc
