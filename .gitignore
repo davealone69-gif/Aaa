@@ -1,0 +1,14 @@
+.gradle/
+.kotlin/
+**/build/
+local.properties
+worker/__pycache__/
+bridge-data/
+**/bridge-data/
+*.zip
+*.apk
+*.aab
+*.safetensors
+*.ckpt
+*.pth
+*.log
