@@ -24,7 +24,7 @@ The new studio persistence layer is real at the repository/Room contract level: 
 | Image generation/editing | NOT_INSTALLED | Provider contract and unavailable endpoint only |
 | Video generation | NOT_INSTALLED | Wan/LTX health and unavailable endpoint only |
 | Audio/talking avatar | UNAVAILABLE | Contracts only; no backend |
-| UI projects/scenes/references | MISSING | Existing UI is GLB import/export and adult-mode only; no dead controls were added |
+| UI projects/scenes/references | REAL + UNVERIFIED | Activity exposes project CRUD, scene CRUD, reference import/list/delete/text preview, and GLB access; no Android device test |
 | Worker project/reference API | NOT IMPLEMENTED | Android repository is the current persistence boundary; HTTP endpoints are not needed for offline local CRUD |
 | Resource governor | REAL + VERIFIED contract | Device behavior unverified |
 | Model manager | REAL + VERIFIED contract | Large-model installation not exercised |
@@ -36,7 +36,7 @@ The new studio persistence layer is real at the repository/Room contract level: 
 
 ### Feature: Project/scene/reference UI
 
-**STATUS:** MISSING. **WHAT EXISTS:** SDK repository and Room records. **WHAT IS MISSING:** project list, scene editor, reference browser, import/preview/attach screens. **DEPENDENCY/BLOCKER:** Android UI work and lifecycle testing. **SMALLEST FIX:** add one screen backed directly by `StudioRepository`, starting with project list and reference import.
+**STATUS:** REAL + UNVERIFIED. **WHAT EXISTS:** Activity screens backed directly by `StudioRepository`: project CRUD, scene CRUD, reference import/list/delete/text preview, and GLB import/export access. **WHAT IS MISSING:** device runtime verification, image/video previews, attach relation UI, and multi-activity navigation. **DEPENDENCY/BLOCKER:** Android device/emulator and further relation/preview work. **SMALLEST FIX:** run the UI flow on a device, then add explicit scene/reference relation records.
 
 ### Feature: Scene rendering
 

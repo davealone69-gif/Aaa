@@ -71,7 +71,10 @@ class StudioRepository(private val context: Context) {
         if (existing != null) { temp.delete(); return existing }
         val id = UUID.randomUUID().toString(); val target = File(root, "$id-$safeName"); require(temp.renameTo(target)) { "Unable to store reference" }
         val record = ReferenceRecord(id, requireId(projectId), safeName, context.contentResolver.getType(uri) ?: mimeFor(safeName), categoryFor(safeName), bytes, checksum, System.currentTimeMillis(), null, "", target.absolutePath, previewStatusFor(safeName), if (textLike) lines else null)
-        db.studio().insertReference(record)
+        if (db.studio().insertReference(record) == -1L) {
+            target.delete()
+            return requireNotNull(db.studio().findReferenceByChecksum(checksum))
+        }
         return record
     }
     fun listReferences(projectId: String): List<ReferenceRecord> = db.studio().listReferences(requireId(projectId))

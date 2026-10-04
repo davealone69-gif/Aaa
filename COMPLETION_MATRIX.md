@@ -54,4 +54,4 @@ Statuses are conservative and evidence-based. `REAL + VERIFIED` means an executa
 | Unified media jobs | REAL + UNVERIFIED | Common Kotlin media job models exist; only unavailable Worker contracts are exercised |
 | Reference library | REAL + VERIFIED contract | Streamed controlled-storage import, SHA-256 deduplication, metadata, text preview, delete |
 | Reference preview | PARTIAL | Text preview and metadata exist; image/video thumbnails and dimensions are not implemented |
-| Project/scene/reference UI | MISSING | No project, scene, or reference screens added; existing UI remains GLB-focused |
+| Project/scene/reference UI | REAL + UNVERIFIED | Activity now exposes project CRUD, scene CRUD, reference import/list/delete/text preview, and GLB access; no device runtime test |
