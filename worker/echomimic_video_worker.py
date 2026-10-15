@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Authenticated EchoMimicV3-Flash worker. Run only on a private Linux/CUDA GPU host."""
 from __future__ import annotations
-import base64, hashlib, json, os, subprocess, tempfile
+import base64, hashlib, json, os, subprocess, tempfile, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,6 +20,7 @@ FFPROBE = os.environ.get('FFPROBE', 'ffprobe')
 MAX_IMAGE = int(os.environ.get('MAX_IMAGE_BYTES', str(20 * 1024 * 1024)))
 MAX_AUDIO = int(os.environ.get('MAX_AUDIO_BYTES', str(50 * 1024 * 1024)))
 MAX_OUTPUT = int(os.environ.get('MAX_VIDEO_BYTES', str(512 * 1024 * 1024)))
+INFERENCE_LOCK = threading.Lock()
 
 
 def health():
@@ -86,7 +87,8 @@ class Handler(BaseHTTPRequestHandler):
                 width = max(256, min(int(req.get('width', 768)), 768)); height = max(256, min(int(req.get('height', 768)), 768))
                 command = [PYTHON, str(ROOT / 'infer_flash.py'), '--image_path', str(image_path), '--audio_path', str(audio_path), '--prompt', str(req.get('prompt') or 'A person is speaking naturally.'), '--num_inference_steps', str(steps), '--config_path', CONFIG, '--model_name', MODEL, '--ckpt_idx', CKPT, '--transformer_path', TRANSFORMER, '--save_path', str(out), '--wav2vec_model_dir', WAV2VEC, '--sampler_name', 'Flow_Unipc', '--video_length', str(length), '--sample_size', str(width), str(height), '--fps', '25', '--seed', str(int(req.get('seed', 43))), '--enable_teacache']
                 timeout = max(60, min(int(os.environ.get('VIDEO_JOB_TIMEOUT_SECONDS', '3600')), 14400))
-                run = subprocess.run(command, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
+                with INFERENCE_LOCK:
+                    run = subprocess.run(command, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
                 if run.returncode:
                     return self.send_json(502, {'error': {'code': 'INFERENCE_FAILED', 'message': run.stderr[-2500:]}})
                 files = [p for p in out.rglob('*.mp4') if p.is_file() and p.stat().st_size > 1024]
