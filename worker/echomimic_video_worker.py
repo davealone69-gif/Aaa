@@ -5,7 +5,8 @@ import base64, hashlib, json, os, subprocess, tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(os.environ.get('ECHOMIMIC_ROOT', '')).resolve()
+ROOT_RAW = os.environ.get('ECHOMIMIC_ROOT', '').strip()
+ROOT = Path(ROOT_RAW).resolve() if ROOT_RAW else None
 PYTHON = os.environ.get('ECHOMIMIC_PYTHON', 'python3')
 CONFIG = os.environ.get('ECHOMIMIC_CONFIG', '')
 MODEL = os.environ.get('ECHOMIMIC_MODEL', '')
@@ -22,7 +23,7 @@ MAX_OUTPUT = int(os.environ.get('MAX_VIDEO_BYTES', str(512 * 1024 * 1024)))
 
 
 def health():
-    required = {'checkout': ROOT / 'infer_flash.py' if str(ROOT) != '.' else None,
+    required = {'checkout': ROOT / 'infer_flash.py' if ROOT else None,
                 'config': Path(CONFIG) if CONFIG else None,
                 'base_model': Path(MODEL) if MODEL else None,
                 'transformer': Path(TRANSFORMER) if TRANSFORMER else None,
