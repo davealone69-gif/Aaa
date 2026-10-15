@@ -358,7 +358,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/video/generate":
             try:
                 size = int(self.headers.get("Content-Length", "0"))
-                if size <= 0 or size > MAX_IMAGE_BYTES * 4:
+                max_audio_bytes = int(os.environ.get("MAX_AUDIO_BYTES", str(50 * 1024 * 1024)))
+                if size <= 0 or size > (MAX_IMAGE_BYTES * 2) + (max_audio_bytes * 2) + (1024 * 1024):
                     raise BridgeError("REQUEST_TOO_LARGE", "Video request is empty or exceeds configured limit")
                 request = json.loads(self.rfile.read(size))
                 if not ECHOMIMIC_WORKER_URL:
