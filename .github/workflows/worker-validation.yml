@@ -1,0 +1,28 @@
+name: Worker contract checks
+
+on:
+  pull_request:
+    paths:
+      - "worker/**"
+      - ".github/workflows/worker-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - ".github/workflows/worker-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  python-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile worker modules
+        run: python -m py_compile worker/local_bridge.py worker/echomimic_video_worker.py
+      - name: Verify missing GPU/model is reported honestly
+        run: python -m unittest worker/test_echomimic_unavailable.py

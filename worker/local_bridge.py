@@ -23,6 +23,12 @@ COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 HUNYUAN_URL = os.environ.get("HUNYUAN_URL", "http://127.0.0.1:8080").rstrip("/")
 COMFY_WORKFLOW = Path(os.environ.get("COMFY_WORKFLOW", "workflows/hunyuan3d_image_to_glb_api.json")).resolve()
 TRIPOSR_RUN = Path(os.environ.get("TRIPOSR_RUN", "run.py")).resolve()
+ECHOMIMIC_WORKER_URL = os.environ.get("ECHOMIMIC_WORKER_URL", "").rstrip("/")
+VIDEO_ROOT = ROOT / "video-jobs"
+VIDEO_ASSETS = ROOT / "video-assets"
+VIDEO_ROOT.mkdir(parents=True, exist_ok=True)
+VIDEO_ASSETS.mkdir(parents=True, exist_ok=True)
+VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 HOST = os.environ.get("BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("BRIDGE_PORT", "8090"))
 MAX_IMAGE_BYTES = int(os.environ.get("MAX_IMAGE_BYTES", str(20 * 1024 * 1024)))
@@ -197,6 +203,51 @@ def run_triposr(job_id: str, request: dict[str, Any], work: Path) -> Path:
     if len(candidates) != 1: raise BridgeError("NO_GLB_OUTPUT", f"TripoSR produced {len(candidates)} GLB files; exactly one is required")
     result = work / "result.glb"; shutil.copyfile(candidates[0], result); validate_glb(result); return result
 
+def execute_remote_video(job_id: str, request: dict[str, Any]) -> None:
+    work = VIDEO_ROOT / job_id
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        if not ECHOMIMIC_WORKER_URL:
+            raise BridgeError("VIDEO_BACKEND_UNAVAILABLE", "ECHOMIMIC_WORKER_URL is not configured", "Configure a private EchoMimic GPU worker URL")
+        if not request.get("imageBase64") or not request.get("audioBase64"):
+            raise BridgeError("INPUT_REQUIRED", "imageBase64 and audioBase64 are required")
+        with LOCK:
+            VIDEO_JOBS[job_id].update({"phase": "GENERATING", "message": "Submitting to configured EchoMimic GPU worker"})
+        req = urllib.request.Request(ECHOMIMIC_WORKER_URL + "/generate", data=json_bytes(request), method="POST", headers={"Content-Type": "application/json", "Authorization": "Bearer " + TOKEN})
+        try:
+            with urllib.request.urlopen(req, timeout=int(os.environ.get("VIDEO_JOB_TIMEOUT_SECONDS", "3600"))) as response:
+                data = response.read(MAX_ASSET_BYTES + 1)
+                digest_header = response.headers.get("X-Video-SHA256", "")
+                content_type = response.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[-3000:]
+            raise BridgeError("VIDEO_WORKER_FAILED", f"Worker HTTP {exc.code}: {detail}", "Inspect GPU worker health, logs, model files, and CUDA memory")
+        if content_type.split(";")[0].strip() != "video/mp4" or not data or len(data) > MAX_ASSET_BYTES:
+            raise BridgeError("VIDEO_OUTPUT_INVALID", "Worker did not return a bounded video/mp4 body")
+        digest = hashlib.sha256(data).hexdigest()
+        if digest_header and digest_header != digest:
+            raise BridgeError("VIDEO_HASH_MISMATCH", "Worker output SHA-256 does not match downloaded bytes")
+        with LOCK:
+            VIDEO_JOBS[job_id].update({"phase": "VALIDATING", "message": "Validating downloaded MP4"})
+        result = work / "result.mp4"
+        result.write_bytes(data)
+        probe = subprocess.run([os.environ.get("FFPROBE", "ffprobe"), "-v", "error", "-show_entries", "format=duration,size:stream=codec_type,width,height", "-of", "json", str(result)], capture_output=True, text=True, timeout=30)
+        if probe.returncode:
+            raise BridgeError("VIDEO_VALIDATION_FAILED", "Downloaded MP4 failed ffprobe validation")
+        metadata = json.loads(probe.stdout)
+        streams = metadata.get("streams", [])
+        duration = float(metadata.get("format", {}).get("duration", 0))
+        if duration <= 0 or not any(x.get("codec_type") == "video" for x in streams) or not any(x.get("codec_type") == "audio" for x in streams):
+            raise BridgeError("VIDEO_VALIDATION_FAILED", "MP4 must contain valid audio and video streams and positive duration")
+        final = VIDEO_ASSETS / (digest + ".mp4")
+        final.write_bytes(data)
+        with LOCK:
+            VIDEO_JOBS[job_id].update({"phase": "COMPLETED", "assetId": digest, "validation": {"bytes": len(data), "durationSeconds": duration, "streams": streams}, "message": "Real MP4 downloaded and validated"})
+    except Exception as exc:
+        error = {"code": exc.code, "message": str(exc), "recovery": exc.recovery} if isinstance(exc, BridgeError) else {"code": "INTERNAL", "message": str(exc)}
+        with LOCK:
+            VIDEO_JOBS[job_id].update({"phase": "FAILED", "error": error})
+
 def execute(job_id: str, request: dict[str, Any]) -> None:
     work = ROOT / "jobs" / job_id; work.mkdir(parents=True, exist_ok=True)
     try:
@@ -277,7 +328,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._auth(): return self._send(401, {"error": "unauthorized"})
         path = urllib.parse.urlparse(self.path).path
-        if path == "/health": return self._send(200, health())
+        if path == "/health":
+            status = health()
+            if ECHOMIMIC_WORKER_URL:
+                ok, error = _http_ready(ECHOMIMIC_WORKER_URL + "/health")
+                status["videoWorker"] = {"configured": True, "reachable": ok, **({"error": error} if error else {})}
+            else:
+                status["videoWorker"] = {"configured": False, "reachable": False, "state": "NOT_CONFIGURED"}
+            return self._send(200, status)
+        vm = re.fullmatch(r"/v1/video/jobs/([A-Za-z0-9-]{1,64})", path)
+        if vm:
+            with LOCK: job = dict(VIDEO_JOBS.get(vm.group(1), {}))
+            return self._send(200 if job else 404, job or {"error": "job_not_found"})
+        vm = re.fullmatch(r"/v1/video/assets/([a-f0-9]{64})", path)
+        if vm:
+            asset = VIDEO_ASSETS / (vm.group(1) + ".mp4")
+            return self._send(200, asset.read_bytes(), "video/mp4") if asset.is_file() else self._send(404, {"error": "asset_not_found"})
         m = re.fullmatch(r"/v1/jobs/([A-Za-z0-9-]{1,64})", path)
         if m:
             with LOCK: job = dict(JOBS.get(m.group(1), {}))
@@ -290,7 +356,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._auth(): return self._send(401, {"error": "unauthorized"})
         if self.path == "/v1/video/generate":
-            return self._send(503, {"error": {"code": "VIDEO_BACKEND_UNAVAILABLE", "message": "Wan 2.2 and LTX-2 are not installed", "recovery": "Install and configure a supported local video backend before submitting video jobs"}})
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                max_audio_bytes = int(os.environ.get("MAX_AUDIO_BYTES", str(50 * 1024 * 1024)))
+                if size <= 0 or size > (MAX_IMAGE_BYTES * 2) + (max_audio_bytes * 2) + (1024 * 1024):
+                    raise BridgeError("REQUEST_TOO_LARGE", "Video request is empty or exceeds configured limit")
+                request = json.loads(self.rfile.read(size))
+                if not ECHOMIMIC_WORKER_URL:
+                    return self._send(503, {"error": {"code": "VIDEO_BACKEND_UNAVAILABLE", "message": "No EchoMimic GPU worker is configured", "recovery": "Configure ECHOMIMIC_WORKER_URL and the private worker token"}})
+                job_id = str(request.get("requestId", ""))
+                if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", job_id):
+                    job_id = hashlib.sha256(os.urandom(32)).hexdigest()[:32]
+                with LOCK:
+                    VIDEO_JOBS[job_id] = {"jobId": job_id, "phase": "QUEUED", "createdAt": time.time(), "provider": "echomimicv3-flash"}
+                threading.Thread(target=execute_remote_video, args=(job_id, request), daemon=True).start()
+                return self._send(202, {"jobId": job_id, "statusUrl": "/v1/video/jobs/" + job_id})
+            except BridgeError as error:
+                return self._send(400, {"error": {"code": error.code, "message": str(error), "recovery": error.recovery}})
+            except Exception as error:
+                return self._send(400, {"error": {"code": "INVALID_REQUEST", "message": str(error)}})
         if self.path == "/v1/image/generate":
             return self._send(503, {"error": {"code": "IMAGE_BACKEND_UNAVAILABLE", "message": "No local image-generation workflow is installed", "recovery": "Install and configure a supported local image backend before submitting image jobs"}})
         if self.path == "/v1/audio/generate":
