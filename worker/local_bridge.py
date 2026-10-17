@@ -203,50 +203,186 @@ def run_triposr(job_id: str, request: dict[str, Any], work: Path) -> Path:
     if len(candidates) != 1: raise BridgeError("NO_GLB_OUTPUT", f"TripoSR produced {len(candidates)} GLB files; exactly one is required")
     result = work / "result.glb"; shutil.copyfile(candidates[0], result); validate_glb(result); return result
 
+def _worker_url(path_or_url: str, base_url: str) -> str:
+    """Resolve a worker URL and reject credentials or unsupported schemes."""
+    url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path_or_url)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise BridgeError("VIDEO_WORKER_BAD_URL", "Worker returned an unsafe URL")
+    return url
+
+def _worker_json(url: str, timeout: int, authenticated: bool = True) -> tuple[dict[str, Any], str]:
+    headers = {"Accept": "application/json"}
+    if authenticated:
+        headers["Authorization"] = "Bearer " + TOKEN
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            raw = response.read(2 * 1024 * 1024)
+            if content_type != "application/json":
+                raise BridgeError("VIDEO_WORKER_BAD_STATUS", "Worker job status endpoint did not return JSON")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise BridgeError("VIDEO_WORKER_BAD_STATUS", "Worker status must be a JSON object")
+            return payload, response.geturl()
+    except urllib.error.HTTPError as exc:
+        raise BridgeError("VIDEO_WORKER_STATUS_HTTP", f"Worker status HTTP {exc.code}: {exc.read().decode(errors='replace')[-1000:]}")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise BridgeError("VIDEO_WORKER_STATUS_UNAVAILABLE", str(exc), "Check worker health, network reachability, and job retention")
+
+def _download_worker_video(url: str, destination: Path, timeout: int) -> tuple[bytes, str]:
+    headers = {"Accept": "video/mp4,application/octet-stream"}
+    # Never forward the private worker token to a different host (for example signed object storage).
+    if urllib.parse.urlsplit(url).hostname == urllib.parse.urlsplit(ECHOMIMIC_WORKER_URL).hostname:
+        headers["Authorization"] = "Bearer " + TOKEN
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            body = response.read(MAX_ASSET_BYTES + 1)
+            if len(body) > MAX_ASSET_BYTES:
+                raise BridgeError("VIDEO_OUTPUT_TOO_LARGE", "Downloaded MP4 exceeds configured size limit")
+            if not body:
+                raise BridgeError("VIDEO_OUTPUT_EMPTY", "Worker returned an empty video download")
+            if content_type not in ("video/mp4", "application/octet-stream", "binary/octet-stream"):
+                raise BridgeError("VIDEO_OUTPUT_INVALID", f"Worker download content type is {content_type or 'missing'}, not MP4")
+            destination.write_bytes(body)
+            return body, response.headers.get("X-Video-SHA256", "")
+    except urllib.error.HTTPError as exc:
+        raise BridgeError("VIDEO_DOWNLOAD_FAILED", f"Video download HTTP {exc.code}: {exc.read().decode(errors='replace')[-1000:]}")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise BridgeError("VIDEO_DOWNLOAD_FAILED", str(exc), "Retry the download or inspect the worker's output URL expiry")
+
 def execute_remote_video(job_id: str, request: dict[str, Any]) -> None:
+    """Submit a real async worker job, poll its status, download its artifact, and validate it."""
     work = VIDEO_ROOT / job_id
     work.mkdir(parents=True, exist_ok=True)
     try:
         if not ECHOMIMIC_WORKER_URL:
-            raise BridgeError("VIDEO_BACKEND_UNAVAILABLE", "ECHOMIMIC_WORKER_URL is not configured", "Configure a private EchoMimic GPU worker URL")
+            raise BridgeError("VIDEO_BACKEND_UNAVAILABLE", "ECHOMIMIC_WORKER_URL is not configured", "Deploy a real EchoMimic-compatible GPU worker and configure its URL")
         if not request.get("imageBase64") or not request.get("audioBase64"):
             raise BridgeError("INPUT_REQUIRED", "imageBase64 and audioBase64 are required")
+        max_audio_bytes = int(os.environ.get("MAX_AUDIO_BYTES", str(50 * 1024 * 1024)))
+        image = base64.b64decode(request["imageBase64"], validate=True)
+        audio = base64.b64decode(request["audioBase64"], validate=True)
+        if len(image) > MAX_IMAGE_BYTES or len(audio) > max_audio_bytes:
+            raise BridgeError("INPUT_TOO_LARGE", "Image or audio exceeds configured size limit")
+        timeout = int(os.environ.get("VIDEO_JOB_TIMEOUT_SECONDS", "3600"))
+        poll_seconds = max(1, int(os.environ.get("VIDEO_POLL_INTERVAL_SECONDS", "3")))
+        deadline = time.monotonic() + timeout
         with LOCK:
-            VIDEO_JOBS[job_id].update({"phase": "GENERATING", "message": "Submitting to configured EchoMimic GPU worker"})
-        req = urllib.request.Request(ECHOMIMIC_WORKER_URL + "/generate", data=json_bytes(request), method="POST", headers={"Content-Type": "application/json", "Authorization": "Bearer " + TOKEN})
+            VIDEO_JOBS[job_id].update({"phase": "SUBMITTING", "message": "Submitting image and audio to the configured GPU worker"})
+        submit_url = _worker_url(os.environ.get("VIDEO_WORKER_SUBMIT_PATH", "/generate"), ECHOMIMIC_WORKER_URL)
+        payload = dict(request)
+        # The bridge owns its job ID so duplicate client IDs cannot overwrite active jobs.
+        payload["requestId"] = job_id
+        req = urllib.request.Request(
+            submit_url, data=json_bytes(payload), method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json", "Authorization": "Bearer " + TOKEN}
+        )
         try:
-            with urllib.request.urlopen(req, timeout=int(os.environ.get("VIDEO_JOB_TIMEOUT_SECONDS", "3600"))) as response:
-                data = response.read(MAX_ASSET_BYTES + 1)
-                digest_header = response.headers.get("X-Video-SHA256", "")
-                content_type = response.headers.get("Content-Type", "")
+            with urllib.request.urlopen(req, timeout=min(60, timeout)) as response:
+                content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                raw = response.read(2 * 1024 * 1024)
+                if response.status not in (200, 201, 202):
+                    raise BridgeError("VIDEO_WORKER_REJECTED", f"Worker returned HTTP {response.status}")
+                if content_type != "application/json":
+                    raise BridgeError("VIDEO_WORKER_CONTRACT", "Worker must return a JSON job receipt, not a synchronous video body")
+                receipt = json.loads(raw)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[-3000:]
-            raise BridgeError("VIDEO_WORKER_FAILED", f"Worker HTTP {exc.code}: {detail}", "Inspect GPU worker health, logs, model files, and CUDA memory")
-        if content_type.split(";")[0].strip() != "video/mp4" or not data or len(data) > MAX_ASSET_BYTES:
-            raise BridgeError("VIDEO_OUTPUT_INVALID", "Worker did not return a bounded video/mp4 body")
-        digest = hashlib.sha256(data).hexdigest()
-        if digest_header and digest_header != digest:
-            raise BridgeError("VIDEO_HASH_MISMATCH", "Worker output SHA-256 does not match downloaded bytes")
+            raise BridgeError("VIDEO_WORKER_REJECTED", f"Worker submit HTTP {exc.code}: {exc.read().decode(errors='replace')[-2000:]}", "Check worker API contract, model weights, and GPU capacity")
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise BridgeError("VIDEO_WORKER_UNAVAILABLE", str(exc), "Check worker health and network reachability")
+        if not isinstance(receipt, dict):
+            raise BridgeError("VIDEO_WORKER_CONTRACT", "Worker submit response is not a JSON object")
+        remote_id = receipt.get("jobId") or receipt.get("job_id") or receipt.get("id")
+        status_ref = receipt.get("statusUrl") or receipt.get("status_url")
+        if not status_ref and remote_id:
+            status_ref = os.environ.get("VIDEO_WORKER_STATUS_PATH", "/jobs/{job_id}").replace("{job_id}", urllib.parse.quote(str(remote_id), safe=""))
+        if not status_ref:
+            raise BridgeError("VIDEO_WORKER_CONTRACT", "Worker receipt must include jobId and/or statusUrl; refusing to claim success without polling")
+        status_url = _worker_url(str(status_ref), ECHOMIMIC_WORKER_URL)
+        allowed_worker_host = urllib.parse.urlsplit(ECHOMIMIC_WORKER_URL).hostname
+        if urllib.parse.urlsplit(status_url).hostname != allowed_worker_host:
+            raise BridgeError("VIDEO_WORKER_BAD_URL", "Worker status URL must remain on the configured worker host")
         with LOCK:
-            VIDEO_JOBS[job_id].update({"phase": "VALIDATING", "message": "Validating downloaded MP4"})
-        result = work / "result.mp4"
-        result.write_bytes(data)
-        probe = subprocess.run([os.environ.get("FFPROBE", "ffprobe"), "-v", "error", "-show_entries", "format=duration,size:stream=codec_type,width,height", "-of", "json", str(result)], capture_output=True, text=True, timeout=30)
-        if probe.returncode:
-            raise BridgeError("VIDEO_VALIDATION_FAILED", "Downloaded MP4 failed ffprobe validation")
-        metadata = json.loads(probe.stdout)
-        streams = metadata.get("streams", [])
-        duration = float(metadata.get("format", {}).get("duration", 0))
-        if duration <= 0 or not any(x.get("codec_type") == "video" for x in streams) or not any(x.get("codec_type") == "audio" for x in streams):
-            raise BridgeError("VIDEO_VALIDATION_FAILED", "MP4 must contain valid audio and video streams and positive duration")
-        final = VIDEO_ASSETS / (digest + ".mp4")
-        final.write_bytes(data)
-        with LOCK:
-            VIDEO_JOBS[job_id].update({"phase": "COMPLETED", "assetId": digest, "validation": {"bytes": len(data), "durationSeconds": duration, "streams": streams}, "message": "Real MP4 downloaded and validated"})
+            VIDEO_JOBS[job_id].update({"phase": "QUEUED", "upstreamId": str(remote_id or ""), "message": "Worker accepted the job; polling actual job status"})
+        terminal_success = {"COMPLETED", "SUCCEEDED", "SUCCESS", "DONE"}
+        terminal_failure = {"FAILED", "ERROR", "CANCELLED", "CANCELED", "REJECTED"}
+        while time.monotonic() < deadline:
+            status, _ = _worker_json(status_url, timeout=min(30, max(5, int(deadline - time.monotonic()))))
+            raw_state = status.get("phase") or status.get("status") or status.get("state")
+            state = str(raw_state or "").upper()
+            with LOCK:
+                VIDEO_JOBS[job_id].update({"phase": "WORKER_" + (state or "UNKNOWN"), "workerStatus": status, "message": "Polling upstream generation job"})
+            if state in terminal_failure:
+                error_value = status.get("error") or status.get("message") or state
+                raise BridgeError("VIDEO_WORKER_JOB_FAILED", str(error_value)[:2000], "Inspect the GPU worker logs and model runtime")
+            if state in terminal_success:
+                output = status.get("video") or status.get("output") or status.get("result")
+                if isinstance(output, dict):
+                    output = output.get("url") or output.get("downloadUrl") or output.get("download_url")
+                output_url = status.get("downloadUrl") or status.get("download_url") or status.get("outputUrl") or status.get("output_url") or output
+                if not output_url and status.get("assetUrl"):
+                    output_url = status["assetUrl"]
+                if not output_url:
+                    raise BridgeError("VIDEO_WORKER_CONTRACT", "Worker reported success without a downloadable video URL")
+                video_url = _worker_url(str(output_url), ECHOMIMIC_WORKER_URL)
+                with LOCK:
+                    VIDEO_JOBS[job_id].update({"phase": "DOWNLOADING", "message": "Worker completed; downloading the actual video artifact"})
+                result = work / "result.mp4"
+                data, digest_header = _download_worker_video(video_url, result, timeout=min(300, timeout))
+                digest = hashlib.sha256(data).hexdigest()
+                if digest_header and digest_header.lower().removeprefix("sha256:") != digest:
+                    raise BridgeError("VIDEO_HASH_MISMATCH", "Worker-provided SHA-256 does not match downloaded bytes")
+                with LOCK:
+                    VIDEO_JOBS[job_id].update({"phase": "VALIDATING", "message": "Checking MP4 container and decoding streams"})
+                probe = subprocess.run(
+                    [os.environ.get("FFPROBE", "ffprobe"), "-v", "error", "-show_entries",
+                     "format=format_name,duration,size:stream=codec_type,codec_name,width,height,duration",
+                     "-of", "json", str(result)],
+                    capture_output=True, text=True, timeout=45
+                )
+                if probe.returncode:
+                    raise BridgeError("VIDEO_VALIDATION_FAILED", "Downloaded artifact failed ffprobe validation: " + probe.stderr[-1000:])
+                metadata = json.loads(probe.stdout)
+                fmt = metadata.get("format", {})
+                streams = metadata.get("streams", [])
+                duration = float(fmt.get("duration") or 0)
+                format_names = str(fmt.get("format_name", "")).split(",")
+                has_video = any(x.get("codec_type") == "video" and int(x.get("width") or 0) > 0 and int(x.get("height") or 0) > 0 for x in streams)
+                has_audio = any(x.get("codec_type") == "audio" for x in streams)
+                if "mp4" not in format_names and "mov" not in format_names:
+                    raise BridgeError("VIDEO_VALIDATION_FAILED", "Downloaded file is not recognized as an MP4/MOV container")
+                if duration <= 0 or not has_video or not has_audio or result.stat().st_size < 1024:
+                    raise BridgeError("VIDEO_VALIDATION_FAILED", "MP4 must be non-empty, have positive duration, and contain decodable video and audio streams")
+                # Decode the entire file, not just its header, before publishing the asset.
+                decode = subprocess.run(
+                    [os.environ.get("FFMPEG", "ffmpeg"), "-v", "error", "-i", str(result), "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=min(300, timeout)
+                )
+                if decode.returncode:
+                    raise BridgeError("VIDEO_VALIDATION_FAILED", "Full video/audio decode failed: " + decode.stderr[-1000:])
+                final = VIDEO_ASSETS / (digest + ".mp4")
+                temporary = final.with_suffix(".mp4.tmp")
+                temporary.write_bytes(data)
+                temporary.replace(final)
+                with LOCK:
+                    VIDEO_JOBS[job_id].update({
+                        "phase": "COMPLETED", "assetId": digest,
+                        "downloadUrl": "/v1/video/assets/" + digest,
+                        "validation": {"bytes": len(data), "sha256": digest, "durationSeconds": duration,
+                                       "container": format_names, "streams": streams, "fullDecodePassed": True},
+                        "message": "Real worker job completed; MP4 downloaded, fully decoded, and validated"
+                    })
+                return
+            time.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
+        raise BridgeError("VIDEO_JOB_TIMEOUT", "Worker job did not reach a terminal state before the deadline", "Inspect the remote job and increase VIDEO_JOB_TIMEOUT_SECONDS if appropriate")
     except Exception as exc:
         error = {"code": exc.code, "message": str(exc), "recovery": exc.recovery} if isinstance(exc, BridgeError) else {"code": "INTERNAL", "message": str(exc)}
         with LOCK:
-            VIDEO_JOBS[job_id].update({"phase": "FAILED", "error": error})
+            VIDEO_JOBS[job_id].update({"phase": "FAILED", "error": error, "message": "Video generation did not produce a validated MP4"})
 
 def execute(job_id: str, request: dict[str, Any]) -> None:
     work = ROOT / "jobs" / job_id; work.mkdir(parents=True, exist_ok=True)

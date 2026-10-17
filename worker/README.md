@@ -21,6 +21,35 @@ Use `AVATAR_BACKEND=hunyuan` with `HUNYUAN_URL` for a separately installed and v
 
 The ComfyUI path uploads the input to `/upload/image`, submits a pinned API-format workflow to `/prompt`, inspects `/history/{prompt_id}`, and downloads the selected `.glb` through `/view`. The Hunyuan path calls `/generate` and treats the response as GLB only after local validation. The TripoSR path runs the installed `run.py` subprocess and accepts exactly one real `.glb` output.
 
+
+## Genuine talking-video worker contract
+
+The bridge's `/v1/video/generate` endpoint requires a separately deployed, authenticated GPU worker. It does not contain EchoMimic weights and does not turn a health response into a generated video.
+
+Configure:
+
+- `ECHOMIMIC_WORKER_URL`: base URL of the private worker.
+- `BRIDGE_TOKEN`: shared bearer token used for worker submission and same-host polling/downloads.
+- `VIDEO_WORKER_SUBMIT_PATH`: submit endpoint, default `/generate`.
+- `VIDEO_WORKER_STATUS_PATH`: status path template when the receipt omits `statusUrl`, default `/jobs/{job_id}`.
+- `VIDEO_JOB_TIMEOUT_SECONDS`: maximum wait, default 3600.
+- `VIDEO_POLL_INTERVAL_SECONDS`: polling interval, default 3.
+- `FFPROBE` and `FFMPEG`: executable names/paths required for container inspection and full decode validation.
+
+### Required asynchronous protocol
+
+1. `POST {submit path}` with JSON containing `imageBase64`, `audioBase64`, and `requestId`. Return JSON with `jobId` (or `job_id`/`id`) and optionally `statusUrl`. A synchronous MP4 response is rejected.
+2. `GET {statusUrl}` returns JSON with `phase`, `status`, or `state`. Pending/running states continue polling. `FAILED`, `ERROR`, or cancellation states fail the bridge job.
+3. A successful terminal state (`COMPLETED`, `SUCCEEDED`, `SUCCESS`, or `DONE`) must include a downloadable video URL using `downloadUrl`, `download_url`, `outputUrl`, `output_url`, `video.url`, or `result.url`.
+4. The download must return MP4-compatible content. The bridge checks the worker's optional `X-Video-SHA256`, runs `ffprobe`, requires positive duration and both audio/video streams, then fully decodes the media with `ffmpeg`.
+5. Only after all checks pass does the bridge publish `phase=COMPLETED` and expose `/v1/video/assets/{sha256}`. Any earlier failure results in `phase=FAILED`.
+
+The worker status endpoint must be JSON. Keep `statusUrl` on the configured worker host; downloadable output URLs may point to signed object storage, but the bridge never forwards the private bearer token to a different host.
+
+### What this does not claim
+
+A configured URL or successful `/health` response alone is not proof of model inference. End-to-end verification requires a real image/audio submission, a completed upstream job, a downloaded output, and successful media validation. Until a real deployment passes that test, video generation remains `UNAVAILABLE`.
+
 ## ComfyUI configuration
 
 The bridge does not invent node IDs. Configure `COMFY_IMAGE_NODE`, `COMFY_PROMPT_NODE`, and `COMFY_SEED_NODE` to the IDs in your pinned API workflow. Keep that workflow under administrator control; Android input can change only the whitelisted image, prompt, and seed fields.
